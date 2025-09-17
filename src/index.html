@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>筆記体風ジェネレータ</title>
+  <style>
+    :root { --bg:#0f1115; --panel:#151925; --ink:#e7eaf3; --muted:#9aa3b2; --accent:#66d9ef; --card:#0e1426; --error:#ff6b6b; }
+    html, body { height:100%; }
+    body { margin:0; font:14px/1.6 system-ui,-apple-system,Segoe UI,Roboto,"Hiragino Sans","Noto Sans JP",sans-serif;
+           color:var(--ink); background:radial-gradient(1200px 800px at 10% -20%, #17203a 0%, #0f1115 40%, #0f1115 100%); }
+    .container { max-width: 980px; margin: 0 auto; padding: 20px; display:flex; flex-direction:column; gap:18px; }
+    h1 { margin: 4px 0 0 0; font-size: 22px; letter-spacing: .5px; }
+    .sub { color: var(--muted); margin: 0 0 10px 0; font-size: 13px; }
+    .section { background: var(--panel); border:1px solid #22283a; border-radius:16px; padding:16px; box-shadow: 0 10px 30px rgba(0,0,0,.2); }
+    label { font-weight:700; display:block; margin-bottom:8px; }
+    textarea,input[type="number"],input[type="color"],button { box-sizing:border-box; padding:10px 12px; background:#0f1320; color:var(--ink); border:1px solid #22283a; border-radius:10px; outline:none; }
+    textarea { width:100%; resize:vertical; min-height:96px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; transition: color .2s, border-color .2s, background-color .2s; }
+    .controls { display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:10px; margin-top:10px; }
+    .btn { cursor:pointer; font-weight:700; }
+    .canvas-wrap { background:#0b0f1a; border:1px solid #1c2233; border-radius:16px; overflow:auto; padding:10px; }
+    canvas { display:block; margin:auto; }
+    .glyphs { display:grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap:10px; margin-top:10px; }
+    .card { background: var(--card); border:1px solid #22283a; border-radius:12px; padding:8px; display:flex; flex-direction:column; align-items:center; gap:6px; }
+    .mini { border:1px solid #26314f; background:#0c1020; }
+    .kvs { font-size:11px; color:#c9d2e3; display:flex; flex-wrap:wrap; gap:8px; justify-content:center; }
+    .pill { font-size:12px; color:#dbe1f1; background:#12182a; border:1px solid #2b3349; border-radius:9999px; padding:4px 8px; display:inline-block; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .seqbox { width:100%; min-height:72px; }
+    .hint { font-size:12px; margin-top:6px; color: var(--muted); }
+    .error { color: var(--error) !important; border-color: var(--error) !important; background: #2a0f13 !important; }
+    .error-hint { color: var(--error); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- 1) TEXT 入力 + パラメータ -->
+    <div class="section">
+      <h1>筆記体風ジェネレータ</h1>
+      <p class="sub">ASCIIを入力すると筆記体っぽいうねうねを出力します</p>
+
+      <label for="ascii">TEXT（ASCII）</label>
+      <textarea id="ascii" placeholder="例: HELLOWORLD"></textarea>
+      <div id="inputHint" class="hint">A–Z / 0–9 のみ対応（他は再入力を促します）</div>
+
+      <label style="margin-top:12px;">画像生成パラメータ（そのまま）</label>
+      <div class="controls">
+        <div><div class="muted">余白（PAD）</div><input type="number" id="pad" value="2" min="0" max="32" /></div>
+        <div><div class="muted">シフト（shift）</div><input type="number" step="0.1" id="shift" value="1" min="-128" max="128" /></div>
+        <div><div class="muted">線幅（lineWidth）</div><input type="number" id="lineWidth" value="2" min="1" max="10" /></div>
+        <div><div class="muted">線色（lineColor）</div><input type="color" id="lineColor" value="#00e5ff" /></div>
+      </div>
+    </div>
+
+    <!-- 2) 最終出力（QAM） -->
+    <div class="section">
+      <h2 style="margin:0 0 8px 0; font-size:16px;">最終出力（QAM 16）</h2>
+      <div class="canvas-wrap">
+        <canvas id="canvas"></canvas>
+      </div>
+      <div style="margin-top:10px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <span class="pill" id="status">nibbles: 0 / symbols: 0</span>
+        <button id="downloadBtn" class="btn">PNG保存</button>
+      </div>
+    </div>
+
+    <!-- 3) ビットマップ化（対応グリフの可視化） -->
+    <div class="section">
+      <h2 style="margin:0 0 8px 0; font-size:16px;">ビットマップ化（4×4の行ごと4bit）</h2>
+      <div id="glyphs" class="glyphs"></div>
+    </div>
+
+    <!-- 4) 数列（1..16） -->
+    <div class="section">
+      <h2 style="margin:0 0 8px 0; font-size:16px;">数列（1..16, カンマ区切り）</h2>
+      <textarea id="seq" class="seqbox" readonly placeholder="自動生成されます"></textarea>
+    </div>
+  </div>
+
+  <!-- 画像ジェネレーターは既存のまま（同ディレクトリに qam_image_generator.js を配置） -->
+  <script src="./qam_image_generator.js"></script>
+
+  <script>
+    // ====== フォント（16bit） ======
+    const fontData = {
+      'A': 0x69f9, 'B': 0xe9e9, 'C': 0x7887, 'D': 0xe99e, 'E': 0xf8e8, 'F': 0xf8c8,
+      'G': 0x78b7, 'H': 0x9f99, 'I': 0xe44e, 'J': 0x3196, 'K': 0x9aca, 'L': 0x888f,
+      'M': 0x9ff9, 'N': 0x9db9, 'O': 0x6996, 'P': 0xe9e8, 'Q': 0x69b7, 'R': 0xe9ea,
+      'S': 0x78ef, 'T': 0xf444, 'U': 0x9996, 'V': 0x9964, 'W': 0x9bf9, 'X': 0x9669,
+      'Y': 0x9644, 'Z': 0xf24f,
+      '0': 0x69d6, '1': 0x2627, '2': 0x716f, '3': 0xe161, '4': 0x99f1,
+      '5': 0xf8e1, '6': 0x78e9, '7': 0xf124, '8': 0x6969, '9': 0x6971
+    };
+
+    // ====== Bitmap4x4Rows（固定） ======
+    function asciiToBitmapRowNibbles(str) {
+      const out = [];
+      const detail = [];
+      const S = (str ?? '').toUpperCase();
+      for (let i=0; i<S.length; i++) {
+        const ch = S[i];
+        const bm = fontData[ch];
+        if (bm === undefined) continue; // 0-9A-Z以外は無視
+        const rows = [];
+        for (let r=0; r<4; r++) {
+          const rowVal = (bm >> (12 - 4*r)) & 0xF; // 上→下、左MSB
+          out.push(rowVal);
+          rows.push(rowVal);
+        }
+        detail.push({ ch, bm, rows });
+      }
+      return { nibbles: out, detail };
+    }
+
+    // ====== Index化（0→1 固定） ======
+    function nibblesToIndices(nibs) { return nibs.map(v => (v & 0xF) + 1); }
+
+    // ====== QAM generator ======
+    const canvas = document.getElementById('canvas');
+    const qam = new window.QAMImageGenerator(canvas, { N:4, PAD:2, shift:1.0, lineWidth:2, lineColor:'#00e5ff', H_FIXED:256, PIXEL_MARGIN:24 });
+
+    function clamp(v,a,b){return Math.min(Math.max(v,a),b);}
+    function syncOptions(){
+      const PAD = clamp(parseInt(document.getElementById('pad').value||'2',10),0,32);
+      const shift = parseFloat(document.getElementById('shift').value||'1');
+      const lineWidth = clamp(parseInt(document.getElementById('lineWidth').value||'2',10),1,10);
+      const lineColor = document.getElementById('lineColor').value||'#00e5ff';
+      qam.setOptions({ N:4, PAD, shift, lineWidth, lineColor });
+    }
+
+    // ====== 入力検証 ======
+    function findUnsupportedChars(str) {
+      const S = (str ?? '');
+      const bad = [];
+      for (let i=0;i<S.length;i++) {
+        const ch = S[i];
+        if (/\s/.test(ch)) continue;              // 空白は許容
+        const up = ch.toUpperCase();
+        if (!fontData.hasOwnProperty(up)) bad.push(ch);
+      }
+      return Array.from(new Set(bad)); // unique
+    }
+
+    // ====== 描画（ASCII入力のたびに自動更新） ======
+    const asciiEl = document.getElementById('ascii');
+    const seqEl = document.getElementById('seq');
+    const glyphsEl = document.getElementById('glyphs');
+    const statusEl = document.getElementById('status');
+    const hintEl = document.getElementById('inputHint');
+    const downloadBtn = document.getElementById('downloadBtn');
+
+    const DOT = 8, SCALE = 2;
+    function drawGlyph(canvas, bitmap) {
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      for (let i=0;i<16;i++) {
+        const bit = (bitmap >> (15 - i)) & 1;
+        if (bit) {
+          const r = (i/4)|0, c = i%4;
+          ctx.fillStyle = '#cfe6ff';
+          ctx.fillRect(c * DOT * SCALE, r * DOT * SCALE, DOT * SCALE, DOT * SCALE);
+        }
+      }
+    }
+
+    function updateAll() {
+      syncOptions();
+      const text = asciiEl.value;
+      const bad = findUnsupportedChars(text);
+      if (bad.length > 0) {
+        // 入力促し（赤字）＆描画停止
+        asciiEl.classList.add('error');
+        hintEl.innerHTML = `<span class="error-hint">未対応の文字があります：${bad.map(ch => JSON.stringify(ch)).join(' ') }。A–Z / 0–9 で再入力してください。</span>`;
+        qam.render([]);
+        seqEl.value = '';
+        statusEl.textContent = `nibbles: 0 / symbols: 0`;
+        glyphsEl.innerHTML = '';
+        return;
+      } else {
+        asciiEl.classList.remove('error');
+        hintEl.textContent = 'A–Z / 0–9 のみ対応（他は再入力を促します）';
+      }
+
+      const { nibbles, detail } = asciiToBitmapRowNibbles(text);
+      const indices = nibblesToIndices(nibbles);
+      // QAM描画
+      qam.render(indices);
+      // 数列更新
+      seqEl.value = indices.join(', ');
+      statusEl.textContent = `nibbles: ${indices.length} / symbols: ${indices.length}`;
+
+      // ビットマップ化表示
+      glyphsEl.innerHTML = '';
+      const DOT = 8, SCALE = 2;
+      for (const d of detail) {
+        const wrap = document.createElement('div');
+        wrap.className = 'card';
+        const cv = document.createElement('canvas');
+        cv.className = 'mini';
+        cv.width = DOT*4*SCALE; cv.height = DOT*4*SCALE;
+        drawGlyph(cv, d.bm);
+        const name = document.createElement('div');
+        name.textContent = d.ch + '  (0x' + d.bm.toString(16) + ')';
+        const rows = document.createElement('div');
+        rows.className = 'kvs';
+        const bin = d.rows.map(v => v.toString(2).padStart(4,'0')).join(' | ');
+        const dec = d.rows.join(', ');
+        rows.innerHTML = `<span>rows(bit): ${bin}</span><span>rows(dec): ${dec}</span>`;
+        wrap.appendChild(cv); wrap.appendChild(name); wrap.appendChild(rows);
+        glyphsEl.appendChild(wrap);
+      }
+    }
+
+    // 入力・パラメータ変更で即時更新
+    asciiEl.addEventListener('input', updateAll);
+    document.getElementById('pad').addEventListener('input', updateAll);
+    document.getElementById('shift').addEventListener('input', updateAll);
+    document.getElementById('lineWidth').addEventListener('input', updateAll);
+    document.getElementById('lineColor').addEventListener('input', updateAll);
+
+    // PNG保存
+    downloadBtn.addEventListener('click', () => {
+      qam.toBlob().then(blob => {
+        const link=document.createElement('a');
+        link.download='qam_bitmap4x4.png';
+        link.href=URL.createObjectURL(blob);
+        document.body.appendChild(link);
+        link.click();
+        URL.revokeObjectURL(link.href);
+        link.remove();
+      });
+    });
+
+    // 初期表示（例：HELLOWORLD）
+    asciiEl.value = 'HELLOWORLD';
+    updateAll();
+  </script>
+</body>
+</html>

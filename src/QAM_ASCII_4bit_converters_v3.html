@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QAM: ASCII→4bit 変換クラス ×3（HL / ビットマップ4x4 / Uniform-A）</title>
+  <style>
+    :root { --bg:#0f1115; --panel:#151925; --ink:#e7eaf3; --muted:#9aa3b2; --accent:#66d9ef; }
+    html, body { height:100%; }
+    body { margin:0; font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,"Hiragino Sans","Noto Sans JP",sans-serif;
+           color:var(--ink); background:var(--bg); display:grid; grid-template-columns:420px 1fr; gap:16px; overflow:hidden; }
+    .panel { background:var(--panel); padding:16px; border-radius:16px; margin:16px; box-shadow:0 10px 30px rgba(0,0,0,.2); display:flex; flex-direction:column; }
+    .panel h1 { font-size:18px; margin:0 0 6px; }
+    .panel p { color:var(--muted); margin:0 0 8px; }
+    label { display:block; font-weight:600; margin:12px 0 6px; }
+    textarea,input[type="number"],select,input[type="color"]{width:100%;box-sizing:border-box;padding:10px 12px;background:#0f1320;color:var(--ink);border:1px solid #22283a;border-radius:10px;outline:none;}
+    textarea{resize:vertical;min-height:96px;font-family:ui-monospace,monospace;}
+    .controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px;}
+    button{cursor:pointer;padding:10px 12px;border-radius:10px;border:1px solid #2b3349;background:#182033;color:var(--ink);font-weight:700;}
+    button.primary{background:linear-gradient(180deg,#2a72ff,#1e4fd1);border-color:#2250d4;}
+    .canvas-wrap{position:relative;margin:16px 16px 16px 0;border-radius:16px;overflow:auto;background:#0b0f1a;border:1px solid #1c2233;}
+    canvas{display:block;}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .hint{color:var(--muted);font-size:12px}
+    .pill{font-size:12px;color:#dbe1f1;background:#12182a;border:1px solid #2b3349;border-radius:9999px;padding:4px 8px;display:inline-block;margin-top:6px;}
+    .dbg { font-size:12px; color:#c9d2e3; background:#0e1426; border:1px solid #22283a; border-radius:10px; padding:8px; margin-top:8px; }
+    .small { font-size:12px; color:#9aa3b2; }
+  </style>
+</head>
+<body>
+  <aside class="panel">
+    <h1>ASCII → 4bit 配列 → QAM</h1>
+    <p>ASCII入力を 3つの変換クラス（<b>HL</b> / <b>ビットマップ4x4</b> / <b>Uniform-A</b>）で <strong>4bit列</strong>にし、<strong>16-QAM</strong>の1..16にマップして描画。</p>
+
+    <label for="ascii">ASCII 入力</label>
+    <textarea id="ascii" placeholder="例: A"></textarea>
+
+    <div class="row">
+      <div>
+        <label for="conv">変換クラス</label>
+        <select id="conv">
+          <option value="ascii">① ASCII_HL（標準：各文字を[H,L]）</option>
+          <option value="bitmap">② ビットマップ4x4行（A-Z/0-9のみ：各文字を[4行×4bit]）</option>
+          <option value="uA">③ Uniform-A（偏り低減：A-Z/0-9のみ）</option>
+        </select>
+      </div>
+      <div>
+        <label for="indexMode">Index化（1..16への変換）</label>
+        <select id="indexMode" title="ビットマップ4x4の行値→1..16 変換規則">
+          <option value="plus1">nibble+1（0→1, …, 15→16）</option>
+          <option value="f16">Fのみ16（その他はnibbleそのまま）</option>
+        </select>
+        <div class="small">※Bitmap4x4Rowsに適用（他クラスは常に +1）</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button class="primary" id="convertBtn">変換→描画</button>
+      <button id="randomBtn">乱数（数列タブ）</button>
+      <button id="downloadBtn">PNG保存</button>
+      <button id="clearBtn">クリア</button>
+    </div>
+
+    <label for="seq" style="margin-top:10px">数列（1..16, カンマ区切り）</label>
+    <textarea id="seq" placeholder="ここに変換結果（1..16）が入ります。直接編集も可。"></textarea>
+    <p class="hint">※数列は 1..16 の整数で、16-QAM 座標へマップされます。</p>
+
+    <div class="pill" id="status">nibbles: 0 / symbols: 0</div>
+
+    <div class="dbg" id="dbg"></div>
+
+    <div class="row" style="margin-top:10px">
+      <div>
+        <label for="pad">余白（コンステレーション数, 各辺）</label>
+        <input type="number" id="pad" value="2" min="0" max="32" />
+      </div>
+      <div>
+        <label for="shift">シフト値（シンボル単位）</label>
+        <input type="number" step="0.1" id="shift" value="1" min="-128" max="128" />
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="lineWidth">線幅</label>
+        <input type="number" id="lineWidth" value="2" min="1" max="10" />
+      </div>
+      <div>
+        <label for="lineColor">線色</label>
+        <input type="color" id="lineColor" value="#00e5ff" />
+      </div>
+    </div>
+
+  </aside>
+
+  <main class="canvas-wrap">
+    <canvas id="canvas"></canvas>
+  </main>
+
+  <!-- 画像ジェネレーターは既存のまま（同ディレクトリに qam_image_generator.js を配置） -->
+  <script src="./qam_image_generator.js"></script>
+
+  <script>
+  // ===== Data =====
+  const fontData = {
+  'A': 0x69f9, 'B': 0xe9e9, 'C': 0x7887, 'D': 0xe99e, 'E': 0xf8e8, 'F': 0xf8c8,
+  'G': 0x78b7, 'H': 0x9f99, 'I': 0xe44e, 'J': 0x3196, 'K': 0x9aca, 'L': 0x888f,
+  'M': 0x9ff9, 'N': 0x9db9, 'O': 0x6996, 'P': 0xe9e8, 'Q': 0x69b7, 'R': 0xe9ea,
+  'S': 0x78ef, 'T': 0xf444, 'U': 0x9996, 'V': 0x9964, 'W': 0x9bf9, 'X': 0x9669,
+  'Y': 0x9644, 'Z': 0xf24f,
+  '0': 0x69d6, '1': 0x2627, '2': 0x716f, '3': 0xe161, '4': 0x99f1,
+  '5': 0xf8e1, '6': 0x78e9, '7': 0xf124, '8': 0x6969, '9': 0x6971
+};
+  const uniformAMap = {
+  '0': 0x00,
+  '1': 0x22,
+  '2': 0x44,
+  '3': 0x66,
+  '4': 0x88,
+  '5': 0xAA,
+  '6': 0xCC,
+  '7': 0xEE,
+  '8': 0x11,
+  '9': 0x33,
+  'A': 0x55,
+  'B': 0x77,
+  'C': 0x99,
+  'D': 0xBB,
+  'E': 0xDD,
+  'F': 0xFF,
+  'G': 0x02,
+  'H': 0x20,
+  'I': 0x46,
+  'J': 0x64,
+  'K': 0x8A,
+  'L': 0xA8,
+  'M': 0xCE,
+  'N': 0xEC,
+  'O': 0x13,
+  'P': 0x31,
+  'Q': 0x57,
+  'R': 0x75,
+  'S': 0x9B,
+  'T': 0xB9,
+  'U': 0xDF,
+  'V': 0xFD,
+  'W': 0x04,
+  'X': 0x26,
+  'Y': 0x40,
+  'Z': 0x62
+}; // '0-9','A-Z'
+
+  // ===== 3 Conversion Classes =====
+  class ASCII_HL_Converter { // all ASCII: emit [H,L]
+    convert(str) {
+      const out = [];
+      const s = (str ?? '');
+      for (let i=0;i<s.length;i++) {
+        const code = s.charCodeAt(i) & 0xFF; // 0..255
+        out.push((code >> 4) & 0xF); // High
+        out.push(code & 0xF);        // Low
+      }
+      return out;
+    }
+  }
+
+  class Bitmap4x4RowsConverter { // only 0-9A-Z; rows top->bottom, each as 4-bit (0..15)
+    convert(str) {
+      const out = [];
+      const rowsDbg = []; // for debug
+      const S = (str ?? '').toUpperCase();
+      for (let i=0;i<S.length;i++) {
+        const ch = S[i];
+        const bitmap = fontData[ch];
+        if (bitmap === undefined) continue; // ignore unsupported
+        const nibs = [];
+        for (let r=0; r<4; r++) {
+          const rowVal = (bitmap >> (12 - 4*r)) & 0xF; // top->bottom, MSB-left
+          out.push(rowVal);
+          nibs.push(rowVal);
+        }
+        rowsDbg.push({ ch, rows: nibs });
+      }
+      return { nibbles: out, dbg: rowsDbg };
+    }
+  }
+
+  class UniformAConverter { // only 0-9A-Z; return flat nibbles 0..15
+    convert(str) {
+      const out = [];
+      const S = (str ?? '').toUpperCase();
+      for (let i=0;i<S.length;i++) {
+        const ch = S[i];
+        const byte = uniformAMap[ch];
+        if (byte === undefined) continue;
+        out.push((byte >> 4) & 0xF);
+        out.push(byte & 0xF);
+      }
+      return out;
+    }
+  }
+
+  function getConverter(kind) {
+    if (kind === 'bitmap') return new Bitmap4x4RowsConverter();
+    if (kind === 'uA') return new UniformAConverter();
+    return new ASCII_HL_Converter();
+  }
+
+  // ===== UI wires (QAM generator kept "as is") =====
+  let N = 4; // fixed for 4-bit (16-QAM)
+  let PAD = 2;
+  const canvas = document.getElementById('canvas');
+  const tAscii = document.getElementById('ascii');
+  const tSeq = document.getElementById('seq');
+  const selConv = document.getElementById('conv');
+  const selIndex = document.getElementById('indexMode');
+  const ipPad = document.getElementById('pad');
+  const ipShift = document.getElementById('shift');
+  const ipLineWidth = document.getElementById('lineWidth');
+  const ipLineColor = document.getElementById('lineColor');
+  const btnConvert = document.getElementById('convertBtn');
+  const btnClear = document.getElementById('clearBtn');
+  const btnRandom = document.getElementById('randomBtn');
+  const btnDownload = document.getElementById('downloadBtn');
+  const status = document.getElementById('status');
+  const dbg = document.getElementById('dbg');
+
+  const gen = new window.QAMImageGenerator(canvas, { N, PAD, shift: 1.0, lineWidth: 2, lineColor:'#00e5ff', H_FIXED:256, PIXEL_MARGIN:24 });
+
+  function clamp(v,a,b){return Math.min(Math.max(v,a),b);}
+
+  function syncOptions(){
+    PAD = clamp(parseInt(ipPad.value||'2',10),0,32);
+    const lineWidth = clamp(parseInt(ipLineWidth.value||'2',10),1,10);
+    const lineColor = ipLineColor.value||'#00e5ff';
+    const shift = parseFloat(ipShift.value||'1');
+    gen.setOptions({ N:4, PAD, shift, lineWidth, lineColor });
+  }
+
+  function parseSequence(text){
+    return (text||'')
+      .split(/[\\s,]+/).map(s=>s.trim()).filter(Boolean)
+      .map(Number).filter(n=>Number.isInteger(n)&&n>=1&&n<=N*N);
+  }
+
+  function redrawFromSeq(){
+    const seq = parseSequence(tSeq.value);
+    gen.render(seq);
+    status.textContent = `nibbles: ${seq.length} / symbols: ${seq.length}`;
+  }
+
+  function toIndicesFromNibbles(nibs, mode){ // mode: 'plus1' | 'f16'
+    if (mode === 'f16') return nibs.map(v => v===15 ? 16 : v);
+    return nibs.map(v => (v & 0xF) + 1);
+  }
+
+  function convertAndDraw(){
+    syncOptions();
+    const kind = selConv.value;
+    const conv = getConverter(kind);
+    dbg.textContent = '';
+    let nibs = [];
+    if (kind === 'bitmap') {
+      const res = conv.convert(tAscii.value); // {nibbles, dbg}
+      nibs = res.nibbles;
+      // debug first supported char rows
+      if (res.dbg.length) {
+        const d = res.dbg[0];
+        const bins = d.rows.map(v => v.toString(2).padStart(4,'0')).join(' | ');
+        const decs = d.rows.join(', ');
+        dbg.textContent = `Bitmap rows of '${d.ch}':  ${bins}  (dec: ${decs})`;
+      }
+      const indices = toIndicesFromNibbles(nibs, selIndex.value);
+      tSeq.value = indices.join(', ');
+    } else {
+      nibs = conv.convert(tAscii.value); // flat nibble array
+      const indices = toIndicesFromNibbles(nibs, 'plus1');
+      tSeq.value = indices.join(', ');
+    }
+    redrawFromSeq();
+  }
+
+  btnConvert.addEventListener('click', convertAndDraw);
+  btnClear.addEventListener('click', ()=>{ tAscii.value=''; tSeq.value=''; gen.render([]); status.textContent='nibbles: 0 / symbols: 0'; dbg.textContent=''; });
+  btnRandom.addEventListener('click', ()=>{
+    syncOptions();
+    const arr=[]; const count=200;
+    for(let i=0;i<count;i++) arr.push(1+Math.floor(Math.random()*16));
+    tSeq.value = arr.join(', ');
+    redrawFromSeq();
+  });
+  btnDownload.addEventListener('click', ()=>{
+    gen.toBlob().then(blob=>{
+      const link=document.createElement('a');
+      link.download='qam_from_ascii.png';
+      link.href=URL.createObjectURL(blob);
+      document.body.appendChild(link);
+      link.click();
+      URL.revokeObjectURL(link.href);
+      link.remove();
+    });
+  });
+
+  // Initial demo
+  (function init(){
+    tAscii.value = 'A';
+    convertAndDraw();
+  })();
+  </script>
+</body>
+</html>
